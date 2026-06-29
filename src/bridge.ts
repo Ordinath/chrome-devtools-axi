@@ -20,7 +20,13 @@ import {
   type Server,
   type ServerResponse,
 } from "node:http";
-import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import {
   resolveSessionName,
@@ -88,9 +94,30 @@ function writePidFile(port: number): void {
   writeFileSync(pidFile, JSON.stringify({ pid: process.pid, port }));
 }
 
-function removePidFile(): void {
+/**
+ * Remove the session PID file, but only when this process owns it. On a
+ * same-session bind race the losing bridge exits via EADDRINUSE after the
+ * winning bridge has already written the shared PID file; an unconditional
+ * unlink would delete the still-running winner's handle and orphan it (later
+ * `stop`/reuse can no longer find it). A missing, unreadable, or malformed
+ * file — or one recording a different pid — is left untouched. `ownerPid` is
+ * injectable for tests.
+ */
+export function removePidFile(
+  pidFile: string = resolveSessionPidFile(),
+  ownerPid: number = process.pid,
+): void {
   try {
-    unlinkSync(resolveSessionPidFile());
+    const data = JSON.parse(readFileSync(pidFile, "utf-8")) as {
+      pid?: unknown;
+    };
+    if (data.pid !== ownerPid) return;
+  } catch {
+    // Missing, unreadable, or malformed — nothing we own to remove.
+    return;
+  }
+  try {
+    unlinkSync(pidFile);
   } catch {
     // Already gone — fine
   }

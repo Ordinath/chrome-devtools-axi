@@ -1,6 +1,9 @@
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { IncomingMessage, ServerResponse } from "node:http";
 import { Socket } from "node:net";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   BRIDGE_PORT_IN_USE_EXIT_CODE,
   buildTransportArgs,
@@ -12,6 +15,7 @@ import {
   isBridgeClientConnected,
   isBridgeTargetReachable,
   parseBridgeCallPayload,
+  removePidFile,
   resolveBridgeScript,
   resolveTransportSpec,
   type BridgeClient,
@@ -748,5 +752,48 @@ describe("handleBridgeServerError", () => {
 
     expect(exitCodes).toEqual([1]);
     expect(stderr).toContain("boom");
+  });
+});
+
+describe("removePidFile ownership", () => {
+  let dir: string;
+  let pidFile: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "cda-pid-"));
+    pidFile = join(dir, "bridge.pid");
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("leaves the winner's PID file intact when a same-session loser exits", () => {
+    const winnerPid = process.pid + 1;
+    const loserPid = process.pid + 2;
+    writeFileSync(pidFile, JSON.stringify({ pid: winnerPid, port: 9224 }));
+
+    // The EADDRINUSE loser's exit handler must not delete the winner's handle.
+    removePidFile(pidFile, loserPid);
+
+    expect(existsSync(pidFile)).toBe(true);
+  });
+
+  it("removes the PID file when this process owns it", () => {
+    const ownerPid = process.pid + 3;
+    writeFileSync(pidFile, JSON.stringify({ pid: ownerPid, port: 9224 }));
+
+    removePidFile(pidFile, ownerPid);
+
+    expect(existsSync(pidFile)).toBe(false);
+  });
+
+  it("treats a missing or malformed PID file as nothing to remove", () => {
+    expect(() => removePidFile(pidFile, process.pid)).not.toThrow();
+    expect(existsSync(pidFile)).toBe(false);
+
+    writeFileSync(pidFile, "not json");
+    expect(() => removePidFile(pidFile, process.pid)).not.toThrow();
+    expect(existsSync(pidFile)).toBe(true);
   });
 });
