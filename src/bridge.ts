@@ -473,32 +473,27 @@ async function closeServer(server: Server): Promise<void> {
 }
 
 export async function runBridge(port = resolveSessionPort()): Promise<void> {
-  const sessionName = resolveSessionName();
+  // Connect the MCP transport (which spawns chrome-devtools-mcp and launches
+  // Chrome) before binding the port. A same-session bind race then self-heals:
+  // both racers finish booting before listen(), so the loser's EADDRINUSE exit
+  // finds the winner already deep-healthy and reuses it instead of failing. The
+  // trade-off is one wasted Chrome launch on a genuine cross-session collision,
+  // a rare and self-correcting path.
+  const transport = createTransport();
   const client = createBridgeClient();
+  await client.connect(transport);
+  logBridgeMessage("Connected to chrome-devtools-mcp");
+
+  const sessionName = resolveSessionName();
   const server = createBridgeServer(client, sessionName);
   server.on("error", (error: NodeJS.ErrnoException) => {
     handleBridgeServerError(error, port);
   });
-
-  // Bind the port before launching anything heavy. A collision (e.g. a
-  // globally-exported CHROME_DEVTOOLS_AXI_PORT shared across sessions) then
-  // fails fast through the EADDRINUSE handler instead of spawning a full
-  // chrome-devtools-mcp + Chrome only to tear it straight back down.
-  await new Promise<void>((resolve) => {
-    server.listen(port, "127.0.0.1", () => {
-      logBridgeMessage(`Listening on http://127.0.0.1:${port}`);
-      resolve();
-    });
+  server.listen(port, "127.0.0.1", () => {
+    writePidFile(port);
+    logBridgeMessage(`Listening on http://127.0.0.1:${port}`);
+    writeReadySignal();
   });
-
-  // The port is ours; connect the MCP transport (which spawns
-  // chrome-devtools-mcp and launches Chrome) and only then write the PID file
-  // and signal READY, so ensureBridge sees READY only once truly ready.
-  const transport = createTransport();
-  await client.connect(transport);
-  logBridgeMessage("Connected to chrome-devtools-mcp");
-  writePidFile(port);
-  writeReadySignal();
 
   let shuttingDown = false;
   const shutdown = async () => {
