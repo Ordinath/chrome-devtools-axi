@@ -54,7 +54,7 @@ describe("mapErrorMessage", () => {
   });
 });
 
-describe("unsafe session names are rejected on every entry point", () => {
+describe("unsafe session names are rejected on action entry points", () => {
   const saved = process.env.CHROME_DEVTOOLS_AXI_SESSION;
 
   afterEach(() => {
@@ -70,9 +70,14 @@ describe("unsafe session names are rejected on every entry point", () => {
     await expect(stopBridge()).rejects.toThrow(/Invalid/);
   });
 
-  it("getSessionSnapshotIfRunning rejects a dot-only session", async () => {
+  it("ensureBridge rejects a dot-only session instead of targeting the default bridge", async () => {
     process.env.CHROME_DEVTOOLS_AXI_SESSION = "..";
-    await expect(getSessionSnapshotIfRunning()).rejects.toThrow(/Invalid/);
+    await expect(ensureBridge()).rejects.toThrow(/Invalid/);
+  });
+
+  it("getSessionSnapshotIfRunning degrades an invalid session to null instead of throwing", async () => {
+    process.env.CHROME_DEVTOOLS_AXI_SESSION = "..";
+    await expect(getSessionSnapshotIfRunning()).resolves.toBeNull();
   });
 });
 

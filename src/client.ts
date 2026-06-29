@@ -542,17 +542,26 @@ export function mapErrorMessage(message: string): CdpError {
 
 /**
  * Get the current page snapshot without starting the bridge.
- * Returns null if the bridge is not running or healthy.
+ *
+ * Returns null if the bridge is not running or healthy. This is the ambient
+ * home view / SessionStart probe, so it must stay cheap and never throw: an
+ * invalid `CHROME_DEVTOOLS_AXI_SESSION` degrades to "no active session" (null)
+ * here, while action commands (`ensureBridge` / `stopBridge`) still fail loudly.
  */
 export async function getSessionSnapshotIfRunning(): Promise<string | null> {
-  const pidInfo = readPidFile();
+  let sessionName: string;
+  let pidInfo: PidInfo | null;
+  try {
+    sessionName = resolveSessionName();
+    pidInfo = readPidFile(resolveSessionPidFile(sessionName));
+  } catch {
+    return null;
+  }
   if (!pidInfo || !isProcessAlive(pidInfo.pid)) {
     return null;
   }
   if (
-    !(await checkBridgeHealth(pidInfo.port, {
-      expectedSession: resolveSessionName(),
-    }))
+    !(await checkBridgeHealth(pidInfo.port, { expectedSession: sessionName }))
   ) {
     return null;
   }
