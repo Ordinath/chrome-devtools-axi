@@ -313,7 +313,7 @@ function spawnBridgeProcess(port: number, sessionName: string): SpawnedBridge {
  * actionable failure instead of a slow, generic "failed to start" timeout.
  *
  * The guidance is attributed by exit code. Only {@link BRIDGE_PORT_IN_USE_EXIT_CODE}
- * (the bridge's EADDRINUSE sentinel) gets the port-collision explanation; any
+ * (the bridge's EADDRINUSE sentinel) gets the port-in-use explanation; any
  * other early death is a startup failure (npx could not resolve/download
  * chrome-devtools-mcp, a broken `CHROME_DEVTOOLS_AXI_MCP_PATH`, or a
  * Chrome/channel launch failure) and gets the generic startup guidance, so a
@@ -333,8 +333,8 @@ export function buildBridgeEarlyExitError(
 
   if (code === BRIDGE_PORT_IN_USE_EXIT_CODE) {
     return new CdpError(message, "BRIDGE_NOT_READY", [
-      `Port ${port} is already in use by another session's bridge - a hashed-port collision, or a globally-exported CHROME_DEVTOOLS_AXI_PORT forcing every session onto one port.`,
-      "Give each session a distinct CHROME_DEVTOOLS_AXI_PORT, or unset the global so every session derives its own port.",
+      `Port ${port} is already in use. It may be held by another chrome-devtools-axi session's bridge (a hashed-port collision, or a globally-exported CHROME_DEVTOOLS_AXI_PORT forcing every session onto one port), by a stale or crashed bridge that could not be reused, or by an unrelated process.`,
+      "Set a distinct CHROME_DEVTOOLS_AXI_PORT for this session, unset a global CHROME_DEVTOOLS_AXI_PORT so every session derives its own, or free whatever is holding the port.",
     ]);
   }
 

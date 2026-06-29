@@ -276,7 +276,7 @@ describe("buildBridgeEarlyExitError", () => {
     restore("CHROME_DEVTOOLS_AXI_CHANNEL", savedChannel);
   });
 
-  it("names the session, port, exit code, and the port-collision remedy on the EADDRINUSE code", () => {
+  it("names the session, port, exit code, and the port-in-use remedy on the EADDRINUSE code", () => {
     const err = buildBridgeEarlyExitError(
       "worker-2",
       9231,
@@ -294,6 +294,12 @@ describe("buildBridgeEarlyExitError", () => {
     const suggestions = err.suggestions.join("\n");
     expect(suggestions).toContain("9231");
     expect(suggestions).toContain("CHROME_DEVTOOLS_AXI_PORT");
+    // Balanced wording: not over-attributed to a session collision - also
+    // names stale/crashed bridges and unrelated processes, with the
+    // free-the-port remedy stated directly.
+    expect(suggestions).toContain("unrelated process");
+    expect(suggestions).toMatch(/stale|crashed/);
+    expect(suggestions).toContain("free");
   });
 
   it("gives generic startup guidance (not port collision) for a non-EADDRINUSE early exit", () => {
