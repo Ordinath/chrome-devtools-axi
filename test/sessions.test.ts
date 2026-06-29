@@ -58,6 +58,12 @@ describe("validateSessionName", () => {
     expect(() => validateSessionName("a/b")).toThrow(/Invalid/);
   });
 
+  it("rejects dot-only names that would collapse onto the default dir", () => {
+    expect(() => validateSessionName(".")).toThrow(/Invalid/);
+    expect(() => validateSessionName("..")).toThrow(/Invalid/);
+    expect(() => validateSessionName("...")).toThrow(/Invalid/);
+  });
+
   it("rejects shell metacharacters and spaces", () => {
     expect(() => validateSessionName("a b")).toThrow(/Invalid/);
     expect(() => validateSessionName("a;b")).toThrow(/Invalid/);

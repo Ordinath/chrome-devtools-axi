@@ -43,13 +43,20 @@ export function resolveSessionName(): string {
 /**
  * Throw if a non-default session name is unsafe for a filesystem path. Allows
  * 1-64 chars from `[A-Za-z0-9._-]`; rejects path traversal, separators, shell
- * metacharacters, and overlong names.
+ * metacharacters, overlong names, and names made only of dots (`.` / `..` /
+ * `...`), which `resolveSessionStateDir` would otherwise collapse onto the
+ * default session's directory.
  */
 export function validateSessionName(name: string): void {
   if (name === DEFAULT_SESSION_NAME) return;
   if (!/^[A-Za-z0-9._-]{1,64}$/.test(name)) {
     throw new Error(
       `Invalid CHROME_DEVTOOLS_AXI_SESSION "${name}": use 1-64 chars from [A-Za-z0-9._-]`,
+    );
+  }
+  if (/^\.+$/.test(name)) {
+    throw new Error(
+      `Invalid CHROME_DEVTOOLS_AXI_SESSION "${name}": a name made only of dots would collapse onto the default session's state directory`,
     );
   }
 }

@@ -5,7 +5,7 @@
  * persistent MCP session. Exposes a simple HTTP API:
  *   POST /call  { name, args }  → { result }
  *   GET  /tools                 → [{ name, description }]
- *   GET  /health                → { status: "ok" } or 503 { status: "error", error }
+ *   GET  /health                → { status: "ok", session } or 503 { status: "error", error }
  *   GET  /health?deep=1         → also verifies the attached CDP target; 503 may include reason
  *
  * Writes a PID file to ~/.chrome-devtools-axi/bridge.pid on startup.
@@ -22,7 +22,11 @@ import {
 } from "node:http";
 import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { resolveSessionPidFile, resolveSessionPort } from "./sessions.js";
+import {
+  resolveSessionName,
+  resolveSessionPidFile,
+  resolveSessionPort,
+} from "./sessions.js";
 
 export interface BridgeContentBlock {
   type: string;
@@ -197,6 +201,7 @@ export async function handleBridgeRequest(
   client: BridgeClient,
   req: IncomingMessage,
   res: ServerResponse,
+  sessionName?: string,
 ): Promise<void> {
   res.setHeader("Content-Type", "application/json");
 
@@ -220,7 +225,7 @@ export async function handleBridgeRequest(
         return;
       }
     }
-    writeJson(res, 200, { status: "ok" });
+    writeJson(res, 200, { status: "ok", session: sessionName });
     return;
   }
 
@@ -242,14 +247,41 @@ export async function handleBridgeRequest(
   writeJson(res, 404, { error: "not found" });
 }
 
-export function createBridgeServer(client: BridgeClient): Server {
+export function createBridgeServer(
+  client: BridgeClient,
+  sessionName?: string,
+): Server {
   return createServer((req, res) => {
-    void handleBridgeRequest(client, req, res);
+    void handleBridgeRequest(client, req, res, sessionName);
   });
 }
 
 function logBridgeMessage(message: string): void {
   process.stderr.write(`[chrome-devtools-axi] ${message}\n`);
+}
+
+/**
+ * Handle a fatal HTTP server error by logging it and exiting non-zero. An
+ * EADDRINUSE means another bridge already owns this port (typically because
+ * `CHROME_DEVTOOLS_AXI_PORT` was exported globally, forcing every session onto
+ * one port); failing loudly prevents `ensureBridge` from silently attaching to
+ * the other session's bridge. `exit` is injectable for tests.
+ */
+export function handleBridgeServerError(
+  error: NodeJS.ErrnoException,
+  port: number,
+  exit: (code: number) => void = process.exit,
+): void {
+  if (error.code === "EADDRINUSE") {
+    logBridgeMessage(
+      `Port ${port} is already in use (EADDRINUSE) - another bridge is listening there. ` +
+        `Exporting CHROME_DEVTOOLS_AXI_PORT globally forces every session onto one port; ` +
+        `unset it so each session gets its own, or set it only per-session.`,
+    );
+  } else {
+    logBridgeMessage(`Bridge server error: ${getErrorMessage(error)}`);
+  }
+  exit(1);
 }
 
 function writeReadySignal(): void {
@@ -435,7 +467,11 @@ export async function runBridge(port = resolveSessionPort()): Promise<void> {
   await client.connect(transport);
   logBridgeMessage("Connected to chrome-devtools-mcp");
 
-  const server = createBridgeServer(client);
+  const sessionName = resolveSessionName();
+  const server = createBridgeServer(client, sessionName);
+  server.on("error", (error: NodeJS.ErrnoException) => {
+    handleBridgeServerError(error, port);
+  });
   server.listen(port, "127.0.0.1", () => {
     writePidFile(port);
     logBridgeMessage(`Listening on http://127.0.0.1:${port}`);

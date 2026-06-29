@@ -153,18 +153,32 @@ function httpPost(
  * to drive one CDP-backed MCP call (`list_pages`) so callers can distinguish
  * "MCP server is up but the attached browser is gone" from genuine readiness.
  *
+ * With `expectedSession`, a bridge that reports a *different* session name is
+ * treated as unhealthy, so a session never silently reuses another session's
+ * bridge after a port collision (two sessions pinned to one port via a global
+ * `CHROME_DEVTOOLS_AXI_PORT`). A bridge that omits the field (older version) is
+ * accepted, since there is no mismatch to detect.
+ *
  * Exported for tests; production code uses it via `ensureBridge`.
  */
 export async function checkBridgeHealth(
   port: number,
-  opts: { deep?: boolean } = {},
+  opts: { deep?: boolean; expectedSession?: string } = {},
 ): Promise<boolean> {
   try {
     const path = opts.deep ? "/health?deep=1" : "/health";
     const timeoutMs = opts.deep ? DEEP_HEALTH_TIMEOUT_MS : HEALTH_TIMEOUT_MS;
     const resp = await httpGet(port, path, timeoutMs);
     const data = JSON.parse(resp);
-    return data.status === "ok";
+    if (data.status !== "ok") return false;
+    if (
+      opts.expectedSession !== undefined &&
+      typeof data.session === "string" &&
+      data.session !== opts.expectedSession
+    ) {
+      return false;
+    }
+    return true;
   } catch {
     return false;
   }
@@ -270,7 +284,12 @@ export async function ensureBridge(): Promise<number> {
   // attached CDP target has gone away gets recycled instead of returned.
   const pidInfo = readPidFile(pidFile);
   if (pidInfo && isProcessAlive(pidInfo.pid)) {
-    if (await checkBridgeHealth(pidInfo.port, { deep: true })) {
+    if (
+      await checkBridgeHealth(pidInfo.port, {
+        deep: true,
+        expectedSession: sessionName,
+      })
+    ) {
       return pidInfo.port;
     }
     await terminateBridgeProcess(pidInfo.pid, {
@@ -311,10 +330,18 @@ export async function ensureBridge(): Promise<number> {
   const deadline = Date.now() + timeoutMs;
   let sawShallowReady = false;
   while (Date.now() < deadline) {
-    if (await checkBridgeHealth(port, { deep: true })) {
+    if (
+      await checkBridgeHealth(port, {
+        deep: true,
+        expectedSession: sessionName,
+      })
+    ) {
       return port;
     }
-    if (!sawShallowReady && (await checkBridgeHealth(port))) {
+    if (
+      !sawShallowReady &&
+      (await checkBridgeHealth(port, { expectedSession: sessionName }))
+    ) {
       sawShallowReady = true;
     }
     await sleep(500);
@@ -418,7 +445,11 @@ export async function getSessionSnapshotIfRunning(): Promise<string | null> {
   if (!pidInfo || !isProcessAlive(pidInfo.pid)) {
     return null;
   }
-  if (!(await checkBridgeHealth(pidInfo.port))) {
+  if (
+    !(await checkBridgeHealth(pidInfo.port, {
+      expectedSession: resolveSessionName(),
+    }))
+  ) {
     return null;
   }
   try {

@@ -7,6 +7,7 @@ import {
   extractToolText,
   getErrorMessage,
   handleBridgeRequest,
+  handleBridgeServerError,
   isBridgeClientConnected,
   isBridgeTargetReachable,
   parseBridgeCallPayload,
@@ -597,6 +598,28 @@ describe("handleBridgeRequest /health", () => {
     expect(JSON.parse(captured.body)).toEqual({ status: "ok" });
   });
 
+  it("stamps the session name into the /health response when provided", async () => {
+    const client: BridgeClient = {
+      listTools: async () => ({ tools: [] }),
+      callTool: async () => ({ content: [] }),
+      close: async () => {},
+    };
+    const { res, captured } = makeResponse();
+
+    await handleBridgeRequest(
+      client,
+      makeRequest("GET", "/health"),
+      res,
+      "worker-1",
+    );
+
+    expect(captured.statusCode).toBe(200);
+    expect(JSON.parse(captured.body)).toEqual({
+      status: "ok",
+      session: "worker-1",
+    });
+  });
+
   it("returns 503 when MCP server is disconnected", async () => {
     const client: BridgeClient = {
       listTools: async () => {
@@ -677,5 +700,51 @@ describe("handleBridgeRequest /health", () => {
 
     expect(captured.statusCode).toBe(200);
     expect(callToolCalls).toBe(0);
+  });
+});
+
+describe("handleBridgeServerError", () => {
+  function captureStderr<T>(fn: () => T): { result: T; stderr: string } {
+    const original = process.stderr.write.bind(process.stderr);
+    let stderr = "";
+    process.stderr.write = ((chunk: unknown) => {
+      stderr += typeof chunk === "string" ? chunk : String(chunk);
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      return { result: fn(), stderr };
+    } finally {
+      process.stderr.write = original;
+    }
+  }
+
+  it("exits non-zero and explains EADDRINUSE so the bridge fails loudly", () => {
+    const exitCodes: number[] = [];
+    const { stderr } = captureStderr(() =>
+      handleBridgeServerError(
+        Object.assign(new Error("listen EADDRINUSE"), { code: "EADDRINUSE" }),
+        9225,
+        (code) => exitCodes.push(code),
+      ),
+    );
+
+    expect(exitCodes).toEqual([1]);
+    expect(stderr).toContain("9225");
+    expect(stderr).toContain("EADDRINUSE");
+    expect(stderr).toContain("CHROME_DEVTOOLS_AXI_PORT");
+  });
+
+  it("exits non-zero for other fatal server errors", () => {
+    const exitCodes: number[] = [];
+    const { stderr } = captureStderr(() =>
+      handleBridgeServerError(
+        Object.assign(new Error("boom"), { code: "EACCES" }),
+        9225,
+        (code) => exitCodes.push(code),
+      ),
+    );
+
+    expect(exitCodes).toEqual([1]);
+    expect(stderr).toContain("boom");
   });
 });

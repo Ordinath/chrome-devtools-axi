@@ -94,6 +94,7 @@ interface FakeBridgeOptions {
   shallow: "ok" | "error";
   deep: "ok" | "error";
   deepDelayMs?: number;
+  session?: string;
 }
 
 function startFakeBridgeServer(opts: FakeBridgeOptions): Promise<{
@@ -110,7 +111,7 @@ function startFakeBridgeServer(opts: FakeBridgeOptions): Promise<{
         const sendResponse = () => {
           if (outcome === "ok") {
             res.statusCode = 200;
-            res.end(JSON.stringify({ status: "ok" }));
+            res.end(JSON.stringify({ status: "ok", session: opts.session }));
           } else {
             res.statusCode = 503;
             res.end(JSON.stringify({ status: "error" }));
@@ -190,6 +191,41 @@ describe("checkBridgeHealth (deep probe)", () => {
     // Port 1 is privileged and unbound — connection should be refused immediately.
     expect(await checkBridgeHealth(1)).toBe(false);
     expect(await checkBridgeHealth(1, { deep: true })).toBe(false);
+  });
+
+  it("treats a session-name mismatch as unhealthy (another session's bridge)", async () => {
+    const fake = await startFakeBridgeServer({
+      shallow: "ok",
+      deep: "ok",
+      session: "worker-1",
+    });
+    try {
+      expect(
+        await checkBridgeHealth(fake.port, { expectedSession: "worker-2" }),
+      ).toBe(false);
+      expect(
+        await checkBridgeHealth(fake.port, {
+          deep: true,
+          expectedSession: "worker-2",
+        }),
+      ).toBe(false);
+      expect(
+        await checkBridgeHealth(fake.port, { expectedSession: "worker-1" }),
+      ).toBe(true);
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it("accepts a bridge that omits the session field (older version)", async () => {
+    const fake = await startFakeBridgeServer({ shallow: "ok", deep: "ok" });
+    try {
+      expect(
+        await checkBridgeHealth(fake.port, { expectedSession: "worker-1" }),
+      ).toBe(true);
+    } finally {
+      await fake.close();
+    }
   });
 });
 
