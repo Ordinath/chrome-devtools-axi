@@ -21,15 +21,8 @@ import {
   type ServerResponse,
 } from "node:http";
 import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
-import { homedir } from "node:os";
-
-const DEFAULT_PORT = Number.parseInt(
-  process.env.CHROME_DEVTOOLS_AXI_PORT ?? "9224",
-  10,
-);
-const STATE_DIR = join(homedir(), ".chrome-devtools-axi");
-const PID_FILE = join(STATE_DIR, "bridge.pid");
+import { dirname, join, resolve } from "node:path";
+import { resolveSessionPidFile, resolveSessionPort } from "./sessions.js";
 
 export interface BridgeContentBlock {
   type: string;
@@ -86,13 +79,14 @@ export async function isBridgeTargetReachable(
 }
 
 function writePidFile(port: number): void {
-  mkdirSync(STATE_DIR, { recursive: true });
-  writeFileSync(PID_FILE, JSON.stringify({ pid: process.pid, port }));
+  const pidFile = resolveSessionPidFile();
+  mkdirSync(dirname(pidFile), { recursive: true });
+  writeFileSync(pidFile, JSON.stringify({ pid: process.pid, port }));
 }
 
 function removePidFile(): void {
   try {
-    unlinkSync(PID_FILE);
+    unlinkSync(resolveSessionPidFile());
   } catch {
     // Already gone — fine
   }
@@ -435,7 +429,7 @@ async function closeServer(server: Server): Promise<void> {
   });
 }
 
-export async function runBridge(port = DEFAULT_PORT): Promise<void> {
+export async function runBridge(port = resolveSessionPort()): Promise<void> {
   const transport = createTransport();
   const client = createBridgeClient();
   await client.connect(transport);

@@ -299,7 +299,18 @@ export CHROME_DEVTOOLS_AXI_CHANNEL=beta
 This selects which Chrome `--autoConnect` attaches to, and which one is launched in the default and `CHROME_DEVTOOLS_AXI_USER_DATA_DIR` modes.
 It is ignored when `CHROME_DEVTOOLS_AXI_BROWSER_URL` is set, since that connects to an explicit endpoint regardless of channel.
 
-State is stored in `~/.chrome-devtools-axi/`:
+Run multiple isolated bridges at once with `CHROME_DEVTOOLS_AXI_SESSION` - one per agent session, worktree, or test worker:
+
+```sh
+CHROME_DEVTOOLS_AXI_SESSION=worker-1 chrome-devtools-axi open https://example.com
+CHROME_DEVTOOLS_AXI_SESSION=worker-2 chrome-devtools-axi open https://example.org
+```
+
+Each session name gets its own bridge process, port (auto-derived from the name, or pinned with `CHROME_DEVTOOLS_AXI_PORT`), and on-disk state, so concurrent sessions never share a browser or clobber each other's stale-ref tracking.
+A session only isolates the bridge - the connection mode and profile are unchanged; combine with `CHROME_DEVTOOLS_AXI_USER_DATA_DIR` for a persistent per-session profile.
+The default (unset) session keeps port 9224 and the legacy state paths below.
+
+State is stored in `~/.chrome-devtools-axi/` (named sessions nest under `sessions/<name>/`):
 
 | File                  | Purpose                               |
 | --------------------- | ------------------------------------- |
