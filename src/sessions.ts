@@ -34,10 +34,19 @@ const STATE_DIR_NAME = ".chrome-devtools-axi";
 /**
  * Resolve the active session name from `CHROME_DEVTOOLS_AXI_SESSION`. Returns
  * DEFAULT_SESSION_NAME when unset, empty, or whitespace.
+ *
+ * A configured-but-unsafe name throws (via `validateSessionName`). This is the
+ * single chokepoint through which every command obtains the active session, so
+ * validating here guarantees that no entry point - `ensureBridge`, `stopBridge`,
+ * `getSessionSnapshotIfRunning`, the generation counter, or the bridge itself -
+ * can resolve an invalid name into a filesystem path that collapses onto the
+ * default session's directory.
  */
 export function resolveSessionName(): string {
   const raw = process.env.CHROME_DEVTOOLS_AXI_SESSION?.trim();
-  return raw && raw.length > 0 ? raw : DEFAULT_SESSION_NAME;
+  const name = raw && raw.length > 0 ? raw : DEFAULT_SESSION_NAME;
+  validateSessionName(name);
+  return name;
 }
 
 /**

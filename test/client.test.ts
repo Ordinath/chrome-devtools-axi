@@ -9,8 +9,10 @@ import { AxiError } from "axi-sdk-js";
 import {
   CdpError,
   checkBridgeHealth,
+  getSessionSnapshotIfRunning,
   mapErrorMessage,
   resolveBridgeTimeoutMs,
+  stopBridge,
   terminateBridgeProcess,
   waitForProcessExit,
 } from "../src/client.js";
@@ -44,6 +46,28 @@ describe("mapErrorMessage", () => {
 
     expect(error.code).toBe("BROWSER_ERROR");
     expect(error.message).toBe("Page crashed");
+  });
+});
+
+describe("unsafe session names are rejected on every entry point", () => {
+  const saved = process.env.CHROME_DEVTOOLS_AXI_SESSION;
+
+  afterEach(() => {
+    if (saved === undefined) {
+      delete process.env.CHROME_DEVTOOLS_AXI_SESSION;
+    } else {
+      process.env.CHROME_DEVTOOLS_AXI_SESSION = saved;
+    }
+  });
+
+  it("stopBridge rejects a dot-only session instead of killing the default bridge", async () => {
+    process.env.CHROME_DEVTOOLS_AXI_SESSION = "..";
+    await expect(stopBridge()).rejects.toThrow(/Invalid/);
+  });
+
+  it("getSessionSnapshotIfRunning rejects a dot-only session", async () => {
+    process.env.CHROME_DEVTOOLS_AXI_SESSION = "..";
+    await expect(getSessionSnapshotIfRunning()).rejects.toThrow(/Invalid/);
   });
 });
 

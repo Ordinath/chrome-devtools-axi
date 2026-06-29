@@ -44,6 +44,16 @@ describe("resolveSessionName", () => {
     process.env.CHROME_DEVTOOLS_AXI_SESSION = "  worker-1  ";
     expect(resolveSessionName()).toBe("worker-1");
   });
+
+  it("throws on a configured-but-unsafe name", () => {
+    process.env.CHROME_DEVTOOLS_AXI_SESSION = "../escape";
+    expect(() => resolveSessionName()).toThrow(/Invalid/);
+  });
+
+  it("throws on a dot-only name that would collapse onto the default dir", () => {
+    process.env.CHROME_DEVTOOLS_AXI_SESSION = "..";
+    expect(() => resolveSessionName()).toThrow(/Invalid/);
+  });
 });
 
 describe("validateSessionName", () => {
@@ -149,5 +159,24 @@ describe("session state paths", () => {
     expect(resolveSessionPidFile("worker-1")).toBe(
       join(STATE_DIR, "sessions", "worker-1", "bridge.pid"),
     );
+  });
+});
+
+describe("session paths reject an unsafe CHROME_DEVTOOLS_AXI_SESSION", () => {
+  const saved = process.env.CHROME_DEVTOOLS_AXI_SESSION;
+
+  afterEach(() => {
+    if (saved === undefined) {
+      delete process.env.CHROME_DEVTOOLS_AXI_SESSION;
+    } else {
+      process.env.CHROME_DEVTOOLS_AXI_SESSION = saved;
+    }
+  });
+
+  it("throws from the env-default path resolvers instead of collapsing to the default dir", () => {
+    process.env.CHROME_DEVTOOLS_AXI_SESSION = "..";
+    expect(() => resolveSessionStateDir()).toThrow(/Invalid/);
+    expect(() => resolveSessionPidFile()).toThrow(/Invalid/);
+    expect(() => resolveSessionPort()).toThrow(/Invalid/);
   });
 });

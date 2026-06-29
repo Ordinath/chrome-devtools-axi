@@ -11,7 +11,6 @@ import {
   resolveSessionName,
   resolveSessionPidFile,
   resolveSessionPort,
-  validateSessionName,
 } from "./sessions.js";
 
 const DEFAULT_BRIDGE_TIMEOUT_MS = 30_000;
@@ -276,7 +275,6 @@ export async function terminateBridgeProcess(
  */
 export async function ensureBridge(): Promise<number> {
   const sessionName = resolveSessionName();
-  validateSessionName(sessionName);
   const port = resolveSessionPort(sessionName);
   const pidFile = resolveSessionPidFile(sessionName);
 
