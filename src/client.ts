@@ -266,14 +266,93 @@ export async function terminateBridgeProcess(
 }
 
 /**
+ * Minimal view of the spawned bridge process that {@link ensureBridge} needs:
+ * an `exit` notification so a bridge that dies before reporting healthy can be
+ * detected. The default {@link spawnBridgeProcess} returns a `ChildProcess`
+ * (which satisfies this); tests inject a fake.
+ */
+export interface SpawnedBridge {
+  on(
+    event: "exit",
+    listener: (code: number | null, signal: NodeJS.Signals | null) => void,
+  ): void;
+}
+
+/**
+ * Spawn the detached bridge process. Prefers the sibling `.ts` (dev mode, run
+ * via tsx) and falls back to the built `.js`, so dev and dist behave the same.
+ */
+function spawnBridgeProcess(port: number, sessionName: string): SpawnedBridge {
+  const bridgeScript = resolveBridgeScript(import.meta.dirname);
+  const script = existsSync(bridgeScript.replace(/\.js$/, ".ts"))
+    ? bridgeScript.replace(/\.js$/, ".ts")
+    : bridgeScript;
+  const runner = script.endsWith(".ts") ? "tsx" : "node";
+
+  const child = spawn(
+    runner === "tsx" ? "npx" : "node",
+    runner === "tsx" ? ["tsx", script] : [script],
+    {
+      stdio: "ignore",
+      env: {
+        ...process.env,
+        CHROME_DEVTOOLS_AXI_PORT: String(port),
+        CHROME_DEVTOOLS_AXI_SESSION: sessionName,
+      },
+      detached: true,
+    },
+  );
+  child.unref();
+  return child;
+}
+
+/**
+ * Build the error thrown when a freshly spawned bridge exits before it ever
+ * reports healthy. The dominant cause is a port collision: another session's
+ * bridge already owns `port` (a hashed-port collision, or a globally-exported
+ * `CHROME_DEVTOOLS_AXI_PORT` pinning every session onto one port), so this
+ * session's bridge hits EADDRINUSE and exits non-zero. Surfacing this the
+ * moment the child dies - rather than polling the full readiness deadline -
+ * turns the documented collision case into a fast, actionable failure instead
+ * of a slow, generic "failed to start" timeout.
+ */
+export function buildBridgeEarlyExitError(
+  sessionName: string,
+  port: number,
+  code: number | null,
+  signal: NodeJS.Signals | null,
+): CdpError {
+  const how =
+    signal != null
+      ? `was killed by ${signal}`
+      : `exited with code ${code ?? "unknown"}`;
+  return new CdpError(
+    `Bridge for session "${sessionName}" ${how} before becoming ready on port ${port}`,
+    "BRIDGE_NOT_READY",
+    [
+      `Port ${port} is likely already in use by another session's bridge - a hashed-port collision, or a globally-exported CHROME_DEVTOOLS_AXI_PORT forcing every session onto one port.`,
+      "Give each session a distinct CHROME_DEVTOOLS_AXI_PORT, or unset the global so every session derives its own port.",
+      "If the port is free, check that chrome-devtools-mcp can start: npx chrome-devtools-mcp@latest --help",
+    ],
+  );
+}
+
+/**
  * Ensure the bridge is running, starting it if needed. Returns the port.
  *
  * Verifies a *deep* health check (one round-trip CDP-backed MCP call) before
  * declaring the bridge ready, so a bridge whose attached browser/Electron
  * target was killed while still answering local /health requests gets torn
  * down + restarted instead of being reused as a stale endpoint.
+ *
+ * `spawnBridge` is injectable for tests; production uses {@link spawnBridgeProcess}.
  */
-export async function ensureBridge(): Promise<number> {
+export async function ensureBridge(
+  spawnBridge: (
+    port: number,
+    sessionName: string,
+  ) => SpawnedBridge = spawnBridgeProcess,
+): Promise<number> {
   const sessionName = resolveSessionName();
   const port = resolveSessionPort(sessionName);
   const pidFile = resolveSessionPidFile(sessionName);
@@ -296,28 +375,20 @@ export async function ensureBridge(): Promise<number> {
   }
 
   // Start a new bridge
+  const child = spawnBridge(port, sessionName);
 
-  const bridgeScript = resolveBridgeScript(import.meta.dirname);
-  // Try .ts first (dev mode), fall back to .js (built)
-  const script = existsSync(bridgeScript.replace(/\.js$/, ".ts"))
-    ? bridgeScript.replace(/\.js$/, ".ts")
-    : bridgeScript;
-  const runner = script.endsWith(".ts") ? "tsx" : "node";
-
-  const child = spawn(
-    runner === "tsx" ? "npx" : "node",
-    runner === "tsx" ? ["tsx", script] : [script],
-    {
-      stdio: "ignore",
-      env: {
-        ...process.env,
-        CHROME_DEVTOOLS_AXI_PORT: String(port),
-        CHROME_DEVTOOLS_AXI_SESSION: sessionName,
-      },
-      detached: true,
-    },
-  );
-  child.unref();
+  // If the freshly spawned bridge dies before it reports healthy - most often
+  // an EADDRINUSE port collision with another session, whose careful stderr
+  // message is lost to `stdio: "ignore"` - fail fast instead of polling the
+  // full readiness deadline and reporting a generic timeout.
+  let childExited = false;
+  let exitCode: number | null = null;
+  let exitSignal: NodeJS.Signals | null = null;
+  child.on("exit", (code, signal) => {
+    childExited = true;
+    exitCode = code;
+    exitSignal = signal;
+  });
 
   // Poll for health — Chrome launch + npx bootstrap can be slow.
   // Track whether the *shallow* health check ever passed so we can attribute
@@ -335,6 +406,9 @@ export async function ensureBridge(): Promise<number> {
       })
     ) {
       return port;
+    }
+    if (childExited) {
+      throw buildBridgeEarlyExitError(sessionName, port, exitCode, exitSignal);
     }
     if (
       !sawShallowReady &&

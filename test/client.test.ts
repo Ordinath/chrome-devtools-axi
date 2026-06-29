@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { spawn } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { createServer, type Server } from "node:http";
 import { AddressInfo } from "node:net";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -7,11 +8,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AxiError } from "axi-sdk-js";
 import {
+  buildBridgeEarlyExitError,
   CdpError,
   checkBridgeHealth,
+  ensureBridge,
   getSessionSnapshotIfRunning,
   mapErrorMessage,
   resolveBridgeTimeoutMs,
+  type SpawnedBridge,
   stopBridge,
   terminateBridgeProcess,
   waitForProcessExit,
@@ -250,6 +254,79 @@ describe("checkBridgeHealth (deep probe)", () => {
     } finally {
       await fake.close();
     }
+  });
+});
+
+describe("buildBridgeEarlyExitError", () => {
+  it("names the session, port, exit code, and the port-collision remedy", () => {
+    const err = buildBridgeEarlyExitError("worker-2", 9231, 1, null);
+
+    expect(err).toBeInstanceOf(CdpError);
+    expect(err.code).toBe("BRIDGE_NOT_READY");
+    expect(err.message).toContain("worker-2");
+    expect(err.message).toContain("9231");
+    expect(err.message).toContain("exited with code 1");
+    const suggestions = err.suggestions.join("\n");
+    expect(suggestions).toContain("9231");
+    expect(suggestions).toContain("CHROME_DEVTOOLS_AXI_PORT");
+  });
+
+  it("reports the terminating signal when the bridge was killed", () => {
+    const err = buildBridgeEarlyExitError("worker-2", 9231, null, "SIGKILL");
+
+    expect(err.message).toContain("was killed by SIGKILL");
+  });
+});
+
+describe("ensureBridge early-exit fast-fail", () => {
+  const savedSession = process.env.CHROME_DEVTOOLS_AXI_SESSION;
+  const savedHome = process.env.HOME;
+  const savedTimeout = process.env.CHROME_DEVTOOLS_AXI_BRIDGE_TIMEOUT_MS;
+  let tmpHome: string;
+
+  const restore = (key: string, value: string | undefined) => {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  };
+
+  beforeEach(() => {
+    // Isolate state under a throwaway HOME so no real bridge.pid is found and
+    // ensureBridge is forced down the spawn-a-new-bridge path.
+    tmpHome = mkdtempSync(join(tmpdir(), "axi-ensure-bridge-"));
+    process.env.HOME = tmpHome;
+    process.env.CHROME_DEVTOOLS_AXI_SESSION = "early-exit-worker";
+    // A long deadline so the assertion proves the *early-exit* path returns
+    // fast, not that it merely hit the timeout.
+    process.env.CHROME_DEVTOOLS_AXI_BRIDGE_TIMEOUT_MS = "20000";
+  });
+
+  afterEach(() => {
+    restore("CHROME_DEVTOOLS_AXI_SESSION", savedSession);
+    restore("HOME", savedHome);
+    restore("CHROME_DEVTOOLS_AXI_BRIDGE_TIMEOUT_MS", savedTimeout);
+    rmSync(tmpHome, { recursive: true, force: true });
+  });
+
+  it("fails fast with a port-collision error when the spawned bridge dies before readiness", async () => {
+    const start = Date.now();
+    let caught: unknown;
+    try {
+      await ensureBridge(() => {
+        const fake = new EventEmitter();
+        // Emit *after* ensureBridge attaches its exit listener.
+        setImmediate(() => fake.emit("exit", 1, null));
+        return fake as unknown as SpawnedBridge;
+      });
+    } catch (error) {
+      caught = error;
+    }
+    const elapsed = Date.now() - start;
+
+    expect(caught).toBeInstanceOf(CdpError);
+    expect((caught as CdpError).code).toBe("BRIDGE_NOT_READY");
+    expect((caught as CdpError).message).toContain("before becoming ready");
+    // The whole point: detecting the early exit must beat the 20s deadline.
+    expect(elapsed).toBeLessThan(5000);
   });
 });
 

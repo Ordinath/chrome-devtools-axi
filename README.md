@@ -310,7 +310,7 @@ Each session name gets its own bridge process, port (auto-derived from the name,
 A session only isolates the bridge - the connection mode and profile are unchanged; combine with `CHROME_DEVTOOLS_AXI_USER_DATA_DIR` for a persistent per-session profile.
 The default (unset) session keeps port 9224 and the legacy state paths below.
 
-Do not export `CHROME_DEVTOOLS_AXI_PORT` globally when running concurrent sessions: it overrides the per-session derived port and forces every session onto the same port, so the second bridge fails to bind and the sessions would collide.
+Do not export `CHROME_DEVTOOLS_AXI_PORT` globally when running concurrent sessions: it overrides the per-session derived port and forces every session onto the same port, so the second session fails to start - its bridge cannot bind the already-taken port, and the first session's bridge is rejected as a mismatch rather than silently shared.
 Rely on the per-session default ports instead, or set `CHROME_DEVTOOLS_AXI_PORT` only inline per command.
 
 State is stored in `~/.chrome-devtools-axi/` (named sessions nest under `sessions/<name>/`):
