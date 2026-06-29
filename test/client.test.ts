@@ -7,6 +7,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AxiError } from "axi-sdk-js";
+import { BRIDGE_PORT_IN_USE_EXIT_CODE } from "../src/bridge.js";
 import {
   buildBridgeEarlyExitError,
   CdpError,
@@ -258,17 +259,69 @@ describe("checkBridgeHealth (deep probe)", () => {
 });
 
 describe("buildBridgeEarlyExitError", () => {
-  it("names the session, port, exit code, and the port-collision remedy", () => {
-    const err = buildBridgeEarlyExitError("worker-2", 9231, 1, null);
+  const savedMcpPath = process.env.CHROME_DEVTOOLS_AXI_MCP_PATH;
+  const savedChannel = process.env.CHROME_DEVTOOLS_AXI_CHANNEL;
+
+  afterEach(() => {
+    const restore = (key: string, value: string | undefined) => {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    };
+    restore("CHROME_DEVTOOLS_AXI_MCP_PATH", savedMcpPath);
+    restore("CHROME_DEVTOOLS_AXI_CHANNEL", savedChannel);
+  });
+
+  it("names the session, port, exit code, and the port-collision remedy on the EADDRINUSE code", () => {
+    const err = buildBridgeEarlyExitError(
+      "worker-2",
+      9231,
+      BRIDGE_PORT_IN_USE_EXIT_CODE,
+      null,
+    );
 
     expect(err).toBeInstanceOf(CdpError);
     expect(err.code).toBe("BRIDGE_NOT_READY");
     expect(err.message).toContain("worker-2");
     expect(err.message).toContain("9231");
-    expect(err.message).toContain("exited with code 1");
+    expect(err.message).toContain(
+      `exited with code ${BRIDGE_PORT_IN_USE_EXIT_CODE}`,
+    );
     const suggestions = err.suggestions.join("\n");
     expect(suggestions).toContain("9231");
     expect(suggestions).toContain("CHROME_DEVTOOLS_AXI_PORT");
+  });
+
+  it("gives generic startup guidance (not port collision) for a non-EADDRINUSE early exit", () => {
+    delete process.env.CHROME_DEVTOOLS_AXI_MCP_PATH;
+    delete process.env.CHROME_DEVTOOLS_AXI_CHANNEL;
+    const err = buildBridgeEarlyExitError("worker-2", 9231, 1, null);
+
+    expect(err.code).toBe("BRIDGE_NOT_READY");
+    expect(err.message).toContain("exited with code 1");
+    const suggestions = err.suggestions.join("\n");
+    expect(suggestions).toContain("chrome-devtools-mcp");
+    expect(suggestions).not.toContain("hashed-port collision");
+    expect(suggestions).not.toContain("another session's bridge");
+  });
+
+  it("points at CHROME_DEVTOOLS_AXI_MCP_PATH when an explicit path is set", () => {
+    process.env.CHROME_DEVTOOLS_AXI_MCP_PATH = "/opt/mcp.js";
+    delete process.env.CHROME_DEVTOOLS_AXI_CHANNEL;
+    const err = buildBridgeEarlyExitError("worker-2", 9231, 1, null);
+
+    const suggestions = err.suggestions.join("\n");
+    expect(suggestions).toContain("CHROME_DEVTOOLS_AXI_MCP_PATH");
+    expect(suggestions).not.toContain("npm prefix -g");
+  });
+
+  it("names the configured Chrome channel as a likely cause when set", () => {
+    delete process.env.CHROME_DEVTOOLS_AXI_MCP_PATH;
+    process.env.CHROME_DEVTOOLS_AXI_CHANNEL = "beta";
+    const err = buildBridgeEarlyExitError("worker-2", 9231, 1, null);
+
+    const suggestions = err.suggestions.join("\n");
+    expect(suggestions).toContain("beta");
+    expect(suggestions).toContain("CHROME_DEVTOOLS_AXI_CHANNEL");
   });
 
   it("reports the terminating signal when the bridge was killed", () => {
@@ -282,6 +335,7 @@ describe("ensureBridge early-exit fast-fail", () => {
   const savedSession = process.env.CHROME_DEVTOOLS_AXI_SESSION;
   const savedHome = process.env.HOME;
   const savedTimeout = process.env.CHROME_DEVTOOLS_AXI_BRIDGE_TIMEOUT_MS;
+  const savedPort = process.env.CHROME_DEVTOOLS_AXI_PORT;
   let tmpHome: string;
 
   const restore = (key: string, value: string | undefined) => {
@@ -295,6 +349,7 @@ describe("ensureBridge early-exit fast-fail", () => {
     tmpHome = mkdtempSync(join(tmpdir(), "axi-ensure-bridge-"));
     process.env.HOME = tmpHome;
     process.env.CHROME_DEVTOOLS_AXI_SESSION = "early-exit-worker";
+    delete process.env.CHROME_DEVTOOLS_AXI_PORT;
     // A long deadline so the assertion proves the *early-exit* path returns
     // fast, not that it merely hit the timeout.
     process.env.CHROME_DEVTOOLS_AXI_BRIDGE_TIMEOUT_MS = "20000";
@@ -304,17 +359,20 @@ describe("ensureBridge early-exit fast-fail", () => {
     restore("CHROME_DEVTOOLS_AXI_SESSION", savedSession);
     restore("HOME", savedHome);
     restore("CHROME_DEVTOOLS_AXI_BRIDGE_TIMEOUT_MS", savedTimeout);
+    restore("CHROME_DEVTOOLS_AXI_PORT", savedPort);
     rmSync(tmpHome, { recursive: true, force: true });
   });
 
-  it("fails fast with a port-collision error when the spawned bridge dies before readiness", async () => {
+  it("fails fast with a port-collision error when the bridge exits with the EADDRINUSE code", async () => {
     const start = Date.now();
     let caught: unknown;
     try {
       await ensureBridge(() => {
         const fake = new EventEmitter();
         // Emit *after* ensureBridge attaches its exit listener.
-        setImmediate(() => fake.emit("exit", 1, null));
+        setImmediate(() =>
+          fake.emit("exit", BRIDGE_PORT_IN_USE_EXIT_CODE, null),
+        );
         return fake as unknown as SpawnedBridge;
       });
     } catch (error) {
@@ -325,8 +383,75 @@ describe("ensureBridge early-exit fast-fail", () => {
     expect(caught).toBeInstanceOf(CdpError);
     expect((caught as CdpError).code).toBe("BRIDGE_NOT_READY");
     expect((caught as CdpError).message).toContain("before becoming ready");
+    expect((caught as CdpError).suggestions.join("\n")).toContain(
+      "CHROME_DEVTOOLS_AXI_PORT",
+    );
     // The whole point: detecting the early exit must beat the 20s deadline.
     expect(elapsed).toBeLessThan(5000);
+  });
+
+  it("fails fast with generic startup guidance for a non-EADDRINUSE early exit", async () => {
+    const start = Date.now();
+    let caught: unknown;
+    try {
+      await ensureBridge(() => {
+        const fake = new EventEmitter();
+        setImmediate(() => fake.emit("exit", 1, null));
+        return fake as unknown as SpawnedBridge;
+      });
+    } catch (error) {
+      caught = error;
+    }
+    const elapsed = Date.now() - start;
+
+    expect(caught).toBeInstanceOf(CdpError);
+    const suggestions = (caught as CdpError).suggestions.join("\n");
+    expect(suggestions).toContain("chrome-devtools-mcp");
+    expect(suggestions).not.toContain("hashed-port collision");
+    expect(elapsed).toBeLessThan(5000);
+  });
+
+  it("reuses a healthy same-session bridge that won the bind race instead of failing on the loser's early exit", async () => {
+    // A concurrent same-session bridge owns the port and reports healthy only on
+    // the *second* deep probe, so the loser's first in-loop check fails and the
+    // pre-throw final deep check is what catches the winner.
+    let deepProbes = 0;
+    const winner = createServer((req, res) => {
+      if (req.method === "GET" && req.url?.startsWith("/health")) {
+        const wantsDeep = req.url.includes("deep=1");
+        if (wantsDeep) deepProbes++;
+        res.setHeader("Content-Type", "application/json");
+        const healthy = !wantsDeep || deepProbes >= 2;
+        res.statusCode = healthy ? 200 : 503;
+        res.end(
+          JSON.stringify(
+            healthy
+              ? { status: "ok", session: "early-exit-worker" }
+              : { status: "error" },
+          ),
+        );
+        return;
+      }
+      res.statusCode = 404;
+      res.end();
+    });
+    await new Promise<void>((r) => winner.listen(0, "127.0.0.1", () => r()));
+    const winnerPort = (winner.address() as AddressInfo).port;
+    process.env.CHROME_DEVTOOLS_AXI_PORT = String(winnerPort);
+
+    try {
+      const port = await ensureBridge(() => {
+        const loser = new EventEmitter();
+        setImmediate(() =>
+          loser.emit("exit", BRIDGE_PORT_IN_USE_EXIT_CODE, null),
+        );
+        return loser as unknown as SpawnedBridge;
+      });
+      expect(port).toBe(winnerPort);
+      expect(deepProbes).toBeGreaterThanOrEqual(2);
+    } finally {
+      await new Promise<void>((r) => winner.close(() => r()));
+    }
   });
 });
 

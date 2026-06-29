@@ -2,6 +2,7 @@ import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { IncomingMessage, ServerResponse } from "node:http";
 import { Socket } from "node:net";
 import {
+  BRIDGE_PORT_IN_USE_EXIT_CODE,
   buildTransportArgs,
   detectGlobalMcpPath,
   extractToolText,
@@ -718,7 +719,7 @@ describe("handleBridgeServerError", () => {
     }
   }
 
-  it("exits non-zero and explains EADDRINUSE so the bridge fails loudly", () => {
+  it("exits with the distinct EADDRINUSE code so ensureBridge can attribute a collision", () => {
     const exitCodes: number[] = [];
     const { stderr } = captureStderr(() =>
       handleBridgeServerError(
@@ -728,7 +729,8 @@ describe("handleBridgeServerError", () => {
       ),
     );
 
-    expect(exitCodes).toEqual([1]);
+    expect(exitCodes).toEqual([BRIDGE_PORT_IN_USE_EXIT_CODE]);
+    expect(BRIDGE_PORT_IN_USE_EXIT_CODE).not.toBe(1);
     expect(stderr).toContain("9225");
     expect(stderr).toContain("EADDRINUSE");
     expect(stderr).toContain("CHROME_DEVTOOLS_AXI_PORT");

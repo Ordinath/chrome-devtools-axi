@@ -261,11 +261,21 @@ function logBridgeMessage(message: string): void {
 }
 
 /**
+ * Distinct exit code the bridge uses for an EADDRINUSE bind failure. A generic
+ * non-zero exit is ambiguous (npx/MCP launch failures exit non-zero too), so
+ * `ensureBridge` keys on this sentinel to attribute an early death to a genuine
+ * port collision versus a startup failure and tailor its error accordingly.
+ */
+export const BRIDGE_PORT_IN_USE_EXIT_CODE = 48;
+
+/**
  * Handle a fatal HTTP server error by logging it and exiting non-zero. An
  * EADDRINUSE means another bridge already owns this port (typically because
  * `CHROME_DEVTOOLS_AXI_PORT` was exported globally, forcing every session onto
- * one port); failing loudly prevents `ensureBridge` from silently attaching to
- * the other session's bridge. `exit` is injectable for tests.
+ * one port); it exits with {@link BRIDGE_PORT_IN_USE_EXIT_CODE} so `ensureBridge`
+ * can distinguish it from any other early death. Failing loudly prevents
+ * `ensureBridge` from silently attaching to the other session's bridge. `exit`
+ * is injectable for tests.
  */
 export function handleBridgeServerError(
   error: NodeJS.ErrnoException,
@@ -278,9 +288,10 @@ export function handleBridgeServerError(
         `Exporting CHROME_DEVTOOLS_AXI_PORT globally forces every session onto one port; ` +
         `unset it so each session gets its own, or set it only per-session.`,
     );
-  } else {
-    logBridgeMessage(`Bridge server error: ${getErrorMessage(error)}`);
+    exit(BRIDGE_PORT_IN_USE_EXIT_CODE);
+    return;
   }
+  logBridgeMessage(`Bridge server error: ${getErrorMessage(error)}`);
   exit(1);
 }
 

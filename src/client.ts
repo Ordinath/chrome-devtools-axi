@@ -6,7 +6,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { readFileSync, existsSync } from "node:fs";
 import { request } from "node:http";
 import { AxiError } from "axi-sdk-js";
-import { resolveBridgeScript } from "./bridge.js";
+import { BRIDGE_PORT_IN_USE_EXIT_CODE, resolveBridgeScript } from "./bridge.js";
 import {
   resolveSessionName,
   resolveSessionPidFile,
@@ -308,13 +308,16 @@ function spawnBridgeProcess(port: number, sessionName: string): SpawnedBridge {
 
 /**
  * Build the error thrown when a freshly spawned bridge exits before it ever
- * reports healthy. The dominant cause is a port collision: another session's
- * bridge already owns `port` (a hashed-port collision, or a globally-exported
- * `CHROME_DEVTOOLS_AXI_PORT` pinning every session onto one port), so this
- * session's bridge hits EADDRINUSE and exits non-zero. Surfacing this the
- * moment the child dies - rather than polling the full readiness deadline -
- * turns the documented collision case into a fast, actionable failure instead
- * of a slow, generic "failed to start" timeout.
+ * reports healthy. Surfacing this the moment the child dies - rather than
+ * polling the full readiness deadline - turns an early death into a fast,
+ * actionable failure instead of a slow, generic "failed to start" timeout.
+ *
+ * The guidance is attributed by exit code. Only {@link BRIDGE_PORT_IN_USE_EXIT_CODE}
+ * (the bridge's EADDRINUSE sentinel) gets the port-collision explanation; any
+ * other early death is a startup failure (npx could not resolve/download
+ * chrome-devtools-mcp, a broken `CHROME_DEVTOOLS_AXI_MCP_PATH`, or a
+ * Chrome/channel launch failure) and gets the generic startup guidance, so a
+ * single-session user with a broken install is not misdirected to port advice.
  */
 export function buildBridgeEarlyExitError(
   sessionName: string,
@@ -326,15 +329,35 @@ export function buildBridgeEarlyExitError(
     signal != null
       ? `was killed by ${signal}`
       : `exited with code ${code ?? "unknown"}`;
-  return new CdpError(
-    `Bridge for session "${sessionName}" ${how} before becoming ready on port ${port}`,
-    "BRIDGE_NOT_READY",
-    [
-      `Port ${port} is likely already in use by another session's bridge - a hashed-port collision, or a globally-exported CHROME_DEVTOOLS_AXI_PORT forcing every session onto one port.`,
+  const message = `Bridge for session "${sessionName}" ${how} before becoming ready on port ${port}`;
+
+  if (code === BRIDGE_PORT_IN_USE_EXIT_CODE) {
+    return new CdpError(message, "BRIDGE_NOT_READY", [
+      `Port ${port} is already in use by another session's bridge - a hashed-port collision, or a globally-exported CHROME_DEVTOOLS_AXI_PORT forcing every session onto one port.`,
       "Give each session a distinct CHROME_DEVTOOLS_AXI_PORT, or unset the global so every session derives its own port.",
-      "If the port is free, check that chrome-devtools-mcp can start: npx chrome-devtools-mcp@latest --help",
-    ],
+    ]);
+  }
+
+  const suggestions = [
+    "Check that chrome-devtools-mcp can start: npx chrome-devtools-mcp@latest --help",
+  ];
+  if (process.env.CHROME_DEVTOOLS_AXI_MCP_PATH) {
+    suggestions.push(
+      "Verify CHROME_DEVTOOLS_AXI_MCP_PATH points to a valid chrome-devtools-mcp build.",
+    );
+  } else {
+    suggestions.push(
+      "`npx -y chrome-devtools-mcp@latest` may have failed to resolve/download the package (offline, or a slow cold first run); install it globally and set:",
+      '  export CHROME_DEVTOOLS_AXI_MCP_PATH="$(npm prefix -g)/lib/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js"',
+    );
+  }
+  const channel = process.env.CHROME_DEVTOOLS_AXI_CHANNEL?.trim();
+  suggestions.push(
+    channel
+      ? `The "${channel}" Chrome release channel (CHROME_DEVTOOLS_AXI_CHANNEL) may not be installed; install it or unset the variable.`
+      : "Or Chrome failed to launch; confirm a usable Chrome is installed.",
   );
+  return new CdpError(message, "BRIDGE_NOT_READY", suggestions);
 }
 
 /**
@@ -377,10 +400,11 @@ export async function ensureBridge(
   // Start a new bridge
   const child = spawnBridge(port, sessionName);
 
-  // If the freshly spawned bridge dies before it reports healthy - most often
-  // an EADDRINUSE port collision with another session, whose careful stderr
-  // message is lost to `stdio: "ignore"` - fail fast instead of polling the
-  // full readiness deadline and reporting a generic timeout.
+  // If the freshly spawned bridge dies before it reports healthy - an EADDRINUSE
+  // port collision with another session, or a startup failure (npx/MCP launch,
+  // Chrome/channel), whose stderr is lost to `stdio: "ignore"` - fail fast
+  // instead of polling the full readiness deadline and reporting a generic
+  // timeout. The exit code attributes the cause (see buildBridgeEarlyExitError).
   let childExited = false;
   let exitCode: number | null = null;
   let exitSignal: NodeJS.Signals | null = null;
@@ -408,6 +432,14 @@ export async function ensureBridge(
       return port;
     }
     if (childExited) {
+      if (
+        await checkBridgeHealth(port, {
+          deep: true,
+          expectedSession: sessionName,
+        })
+      ) {
+        return port;
+      }
       throw buildBridgeEarlyExitError(sessionName, port, exitCode, exitSignal);
     }
     if (
